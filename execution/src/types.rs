@@ -136,3 +136,10 @@ where
         }
     }
 }
+
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct TxGasAndReward {
+    pub gas_used: U256,
+    pub reward: U256,
+}

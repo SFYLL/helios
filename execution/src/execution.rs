@@ -1,3 +1,4 @@
+use std::cmp;
 use std::collections::{BTreeMap, HashMap};
 use std::str::FromStr;
 
@@ -16,7 +17,7 @@ use revm::KECCAK_EMPTY;
 use triehash_ethereum::ordered_trie_root;
 
 use crate::errors::ExecutionError;
-use crate::types::Transactions;
+use crate::types::{Transactions, TxGasAndReward};
 
 use super::proof::{encode_account, verify_proof};
 use super::rpc::ExecutionRpc;
@@ -410,6 +411,13 @@ impl<R: ExecutionRpc> ExecutionClient<R> {
 
             let payload = payload.unwrap();
 
+            let block_payload = self.get_block(&payload, true).await;
+
+            let block_payload = match block_payload {
+                Ok(block_payload) => block_payload,
+                _ => return Ok(None),
+            };
+
             let comparable_base_fee_bytes_saved =
                 ethers::types::U256::from_little_endian(&payload.base_fee_per_gas.to_bytes_le());
 
@@ -437,9 +445,54 @@ impl<R: ExecutionRpc> ExecutionClient<R> {
                     block_to_check,
                 )
                 .into());
+                }
+
+            //check rewards now
+            let mut reward: Vec<Vec<U256>> = Vec::new();
+            if reward_percentiles.len() > 0 {
+                let txs = block_payload.transactions;
+                let txs = match txs {
+                    Transactions::Full(txs) => txs,
+                    _ => return Ok(None)
+                };
+
+                if txs.len() == 0 {
+                    let mut to_push: Vec<U256> =  Vec::new();
+                    for _ in 0..reward_percentiles.len() {
+                        to_push.push(U256::from(0));
+                    }
+                    reward.push(to_push);
+                    continue;
+                }
+
+                let mut sorter: Vec<TxGasAndReward> = Vec::new();
+                
+                for (_pos, _transaction) in txs.iter().enumerate() {
+                    //need receipt to get gas used by each tx ... 
+                    let tx_receipt = self.get_transaction_receipt(&_transaction.hash, payloads).await?.unwrap();
+                    //As Implemented in geth, doesn't take into account coinbase transfers...
+                    let effective_gas_tip = cmp::min(_transaction.max_priority_fee_per_gas.unwrap(), _transaction.max_fee_per_gas.unwrap() - block_payload.base_fee_per_gas);
+                    sorter.push(TxGasAndReward{
+                        gas_used: tx_receipt.gas_used.unwrap(),
+                        reward: effective_gas_tip,
+                    });
+
+                    
+                let mut to_push:Vec<U256> = Vec::new();
+                for (_pos, _percentile) in reward_percentiles.iter().enumerate() {
+                    let threshold_gas_used = (block_payload.gas_used as f64 * _percentile.clone() / 100.0) as u64;
+                    let mut sum_gas_used = 0;
+                    let mut tx_index = 0;
+                    while  sum_gas_used < threshold_gas_used && tx_index < txs.len() {
+                        tx_index+= 1;
+                        sum_gas_used += sorter[_pos].gas_used.as_u64();
+                    }
+                    to_push.push(sorter[_pos].gas_used);
+                }
+                reward.push(to_push);
+                }
             }
         }
-
         Ok(Some(fee_history))
     }
 }
